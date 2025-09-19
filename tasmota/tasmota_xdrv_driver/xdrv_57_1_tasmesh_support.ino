@@ -122,6 +122,8 @@ struct {
   uint8_t key[32];
   uint8_t role;
   uint8_t channel;                 // Wifi channel
+  char ssid[31];
+  char password[63];
   uint8_t interval;
   uint8_t currentTopicSize;
   mesh_flags_t flags;
@@ -152,6 +154,8 @@ enum MESH_Commands {               // commands useable in console or rules
   CMND_MESH_BROKER,                // start broker on ESP32
   CMND_MESH_NODE,                  // start node and connect to broker based on MAC address
   CMND_MESH_PEER,                  // add node to peer list of a broker or node
+  CMND_MESH_SSID,                  // SSID to use for AP (empty for default ESP_<mac>)
+  CMND_MESH_PASSWORD,              // Password to use for AP (must set SSID)
   CMND_MESH_CHANNEL};              // set wifi channel on node (the broker gets it automatically from the AP)
 
 enum MESH_Role {

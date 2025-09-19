@@ -422,6 +422,16 @@ void MESHstartNode(int32_t _channel, uint8_t _role){ //we need a running broker 
 void MESHstartBroker(void) {       // Must be called after WiFi is initialized!! Rule - on system#boot do meshbroker endon
 #ifdef ESP32
   WiFi.mode(WIFI_AP_STA);
+  // WiFi.softAP("TasMesh", "1234567890");
+  if (strlen(MESH.ssid)) {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Broker SSID %s"), MESH.ssid);
+    if (strlen(MESH.password)) {
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Broker Password %s"), MESH.password);
+      WiFi.softAP(MESH.ssid, MESH.password);
+    } else {
+      WiFi.softAP(MESH.ssid, NULL);
+    }
+  }
   WiFi.AP.begin();
   AddLog(LOG_LEVEL_INFO, PSTR("MSH: Broker MAC %s"), WiFi.softAPmacAddress().c_str());
   WiFi.softAPmacAddress(MESH.broker); //set MESH.broker to the needed MAC
@@ -777,10 +787,10 @@ void MESHshow(bool json) {
 \*********************************************************************************************/
 
 const char kMeshCommands[] PROGMEM = "Mesh|"  // Prefix
-  "Broker|Node|Peer|Channel|Interval";
+  "Broker|Node|Peer|Channel|Interval|SSID|Password";
 
 void (* const MeshCommand[])(void) PROGMEM = {
-  &CmndMeshBroker, &CmndMeshNode, &CmndMeshPeer, &CmndMeshChannel, &CmndMeshInterval };
+  &CmndMeshBroker, &CmndMeshNode, &CmndMeshPeer, &CmndMeshChannel, &CmndMeshInterval, &CmndMeshSSID, &CmndMeshPassword };
 
 void CmndMeshBroker(void) {
 #ifdef ESP32  // only ESP32 currently supported as broker
@@ -797,9 +807,13 @@ void CmndMeshNode(void) {
     if (XdrvMailbox.index != 0) { XdrvMailbox.index = 1; }    // Everything not 0 is a full node
     // meshnode FA:KE:AD:DR:ES:S1
     bool broker = false;
-    char EspSsid[11];
+    char EspSsid[31];
     String mac_address = XdrvMailbox.data;
-    snprintf_P(EspSsid, sizeof(EspSsid), PSTR("ESP_%s"), mac_address.substring(6).c_str());
+    if (strlen(MESH.ssid)) {
+      snprintf_P(EspSsid, sizeof(EspSsid), PSTR("%s"), MESH.ssid);
+    } else {
+      snprintf_P(EspSsid, sizeof(EspSsid), PSTR("ESP_%s"), mac_address.substring(6).c_str());
+    }
     int32_t getWiFiChannel(const char *EspSsid);
     if (int32_t ch = WiFi.scanNetworks()) {
       for (uint8_t i = 0; i < ch; i++) {
@@ -853,6 +867,33 @@ void CmndMeshInterval(void) {
     MESHsetSleep();
   }
   ResponseCmndNumber(MESH.interval);
+}
+
+void CmndMeshSSID(void) {
+  if ((XdrvMailbox.data_len > 0) && (XdrvMailbox.data_len < 32)) {
+    snprintf_P(MESH.ssid, sizeof(MESH.ssid), PSTR("%s"), XdrvMailbox.data);
+  } else if (XdrvMailbox.data_len == 0) {
+    memset(MESH.ssid, '\0', sizeof(MESH.ssid));
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: SSID set to default"));
+  } else {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid SSID '%s', must be 1-31 characters long"), XdrvMailbox.data);
+  }
+  ResponseCmndChar(MESH.ssid);
+}
+
+void CmndMeshPassword(void) {
+  if ((XdrvMailbox.data_len > 7) && (XdrvMailbox.data_len < 64)) {
+    snprintf_P(MESH.password, sizeof(MESH.password), PSTR("%s"), XdrvMailbox.data);
+    if (!strlen(MESH.ssid)) {
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: a valid MeshSSID must be set for MeshPassword to be used"));
+    }
+  } else if (XdrvMailbox.data_len == 0) {
+    memset(MESH.password, '\0', sizeof(MESH.password));
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Broker network set to open"));
+  } else {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid Password '%s', must be 8-63 characters long or empty for an open network"), XdrvMailbox.data);
+  }
+  ResponseCmndChar(MESH.password);
 }
 
 /*********************************************************************************************\
