@@ -156,6 +156,7 @@ enum MESH_Commands {               // commands useable in console or rules
   CMND_MESH_PEER,                  // add node to peer list of a broker or node
   CMND_MESH_SSID,                  // SSID to use for AP (empty for default ESP_<mac>)
   CMND_MESH_PASSWORD,              // Password to use for AP (must set SSID)
+  CMND_MESH_KEY,                   // Key to use for encryption
   CMND_MESH_CHANNEL};              // set wifi channel on node (the broker gets it automatically from the AP)
 
 enum MESH_Role {
@@ -338,6 +339,10 @@ void MESHsendPacket(mesh_packet_t *_packet) {
 }
 
 void MESHsetKey(uint8_t* _key) {   // Must be 32 bytes!!!
+  if (strlen((char*)_key)) {
+    AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: using custom crypto key"));
+    return;
+  }
   char* _pw = SettingsText(SET_STAPWD1 + Settings->sta_active);
   size_t _length = strlen(_pw);
   memset(_key, 0, 32);

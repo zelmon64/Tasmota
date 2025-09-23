@@ -787,10 +787,10 @@ void MESHshow(bool json) {
 \*********************************************************************************************/
 
 const char kMeshCommands[] PROGMEM = "Mesh|"  // Prefix
-  "Broker|Node|Peer|Channel|Interval|SSID|Password";
+  "Broker|Node|Peer|Channel|Interval|SSID|Password|Key";
 
 void (* const MeshCommand[])(void) PROGMEM = {
-  &CmndMeshBroker, &CmndMeshNode, &CmndMeshPeer, &CmndMeshChannel, &CmndMeshInterval, &CmndMeshSSID, &CmndMeshPassword };
+  &CmndMeshBroker, &CmndMeshNode, &CmndMeshPeer, &CmndMeshChannel, &CmndMeshInterval, &CmndMeshSSID, &CmndMeshPassword, &CmndMeshKey };
 
 void CmndMeshBroker(void) {
 #ifdef ESP32  // only ESP32 currently supported as broker
@@ -809,26 +809,34 @@ void CmndMeshNode(void) {
     bool broker = false;
     char EspSsid[31];
     String mac_address = XdrvMailbox.data;
-    if (strlen(MESH.ssid)) {
-      snprintf_P(EspSsid, sizeof(EspSsid), PSTR("%s"), MESH.ssid);
+    if (MESH.channel > 0) {
+      broker = true;
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Stating connection to Mesh Broker using MAC %s on channel %d"),
+        XdrvMailbox.data, MESH.channel);
+      MESHstartNode(MESH.channel, XdrvMailbox.index);
+      ResponseCmndNumber(MESH.channel);
     } else {
-      snprintf_P(EspSsid, sizeof(EspSsid), PSTR("ESP_%s"), mac_address.substring(6).c_str());
-    }
-    int32_t getWiFiChannel(const char *EspSsid);
-    if (int32_t ch = WiFi.scanNetworks()) {
-      for (uint8_t i = 0; i < ch; i++) {
-        if (!strcmp(EspSsid, WiFi.SSID(i).c_str())) {
-          MESH.channel = WiFi.channel(i);
-          broker = true;
-          AddLog(LOG_LEVEL_INFO, PSTR("MSH: Successfully connected to Mesh Broker using MAC %s as %s on channel %d"),
-            XdrvMailbox.data, EspSsid, MESH.channel);
-          MESHstartNode(MESH.channel, XdrvMailbox.index);
-          ResponseCmndNumber(MESH.channel);
+      if (strlen(MESH.ssid)) {
+        snprintf_P(EspSsid, sizeof(EspSsid), PSTR("%s"), MESH.ssid);
+      } else {
+        snprintf_P(EspSsid, sizeof(EspSsid), PSTR("ESP_%s"), mac_address.substring(6).c_str());
+      }
+      int32_t getWiFiChannel(const char *EspSsid);
+      if (int32_t ch = WiFi.scanNetworks()) {
+        for (uint8_t i = 0; i < ch; i++) {
+          if (!strcmp(EspSsid, WiFi.SSID(i).c_str())) {
+            MESH.channel = WiFi.channel(i);
+            broker = true;
+            AddLog(LOG_LEVEL_INFO, PSTR("MSH: Successfully connected to Mesh Broker using MAC %s as %s on channel %d"),
+              XdrvMailbox.data, EspSsid, MESH.channel);
+            MESHstartNode(MESH.channel, XdrvMailbox.index);
+            ResponseCmndNumber(MESH.channel);
+          }
         }
       }
     }
     if (!broker) {
-      AddLog(LOG_LEVEL_INFO, PSTR("MSH: No Mesh Broker found using MAC %s"), XdrvMailbox.data);
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: No Mesh Broker found using MAC %s with SSID %s"), XdrvMailbox.data, EspSsid);
     }
   }
 #endif  // ESP32
@@ -856,6 +864,9 @@ void CmndMeshPeer(void) {
 
 void CmndMeshChannel(void) {
   if ((XdrvMailbox.payload > 0) && (XdrvMailbox.payload < 14)) {
+    MESH.channel = XdrvMailbox.payload;
+  } else if (XdrvMailbox.payload == 0) {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Will use broker AP to auto detect Channel"));
     MESH.channel = XdrvMailbox.payload;
   }
   ResponseCmndNumber(MESH.channel);
@@ -894,6 +905,23 @@ void CmndMeshPassword(void) {
     AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid Password '%s', must be 8-63 characters long or empty for an open network"), XdrvMailbox.data);
   }
   ResponseCmndChar(MESH.password);
+}
+
+void CmndMeshKey(void) {
+  if ((XdrvMailbox.data_len > 0) && (XdrvMailbox.data_len < 33)) {
+    memset(MESH.key, 0, 32);
+    size_t _length = XdrvMailbox.data_len;
+    if (_length > 32) { _length = 32; }
+    memcpy(MESH.key, XdrvMailbox.data, _length);
+  } else if (XdrvMailbox.data_len == 0) {
+    memset(MESH.key, 0, 32);
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Will use default key"));
+  } else {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid key '%s', must be 1-32 characters long or empty to use the default"), XdrvMailbox.data);
+  }
+  // ResponseCmndChar((char*)MESH.key);
+  Response_P(S_JSON_COMMAND_ASTERISK, XdrvMailbox.command);
+  // Response_P(S_JSON_COMMAND_INDEX_ASTERISK, XdrvMailbox.command, XdrvMailbox.index);
 }
 
 /*********************************************************************************************\
