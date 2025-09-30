@@ -307,7 +307,7 @@ bool MESHrouteMQTTtoMESH(const char* _topic, char* _data, bool _retained) {
   size_t _bytesLeft = strlen(_topic) + strlen(_data) +2;
   MESH.sendPacket.counter++;
   MESH.sendPacket.chunk = 0;
-  MESH.sendPacket.chunks = (_bytesLeft / MESH_PAYLOAD_SIZE) +1;
+  MESH.sendPacket.chunks = ((_bytesLeft - 1) / MESH_PAYLOAD_SIZE) +1;
   memcpy(MESH.sendPacket.receiver, MESH.broker, 6);
   MESH.sendPacket.type = PACKET_TYPE_MQTT;
   MESH.sendPacket.chunkSize = MESH_PAYLOAD_SIZE;
@@ -530,6 +530,7 @@ void MESHevery50MSecond(void) {
 //        AddLog(LOG_LEVEL_INFO, PSTR("MSH: Received node output '%s'"), (char*)MESH.packetToConsume.front().payload);
         if (MESH.packetToConsume.front().chunks > 1) {
           bool _foundMultiPacket = false;
+          uint8_t it = 0;
           for (auto &_packet_combined : MESH.multiPackets) {
 //            AddLog(LOG_LEVEL_INFO, PSTR("MSH: Append to multipacket"));
             if (memcmp(_packet_combined.header.sender, MESH.packetToConsume.front().sender, 12) == 0) {
@@ -538,17 +539,18 @@ void MESHevery50MSecond(void) {
                 bitSet(_packet_combined.receivedChunks, MESH.packetToConsume.front().chunk);
                 _foundMultiPacket = true;
 //                AddLog(LOG_LEVEL_INFO, PSTR("MSH: Multipacket rcvd chunk mask 0x%08X"), _packet_combined.receivedChunks);
+                uint32_t _temp = (1 << (uint8_t)MESH.packetToConsume.front().chunks) -1; //example: 1+2+4 == (2^3)-1
+//                AddLog(LOG_LEVEL_INFO, PSTR("MSH: _temp: %u = %u"),_temp,_packet_combined.receivedChunks);
+                if (_packet_combined.receivedChunks == _temp) {
+                  char * _data = (char*)_packet_combined.raw + strlen((char*)_packet_combined.raw) + 1;
+//                  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Publish multipacket"));
+                  MqttPublishPayload((char*)_packet_combined.raw, _data);
+                  MESH.multiPackets.erase(MESH.multiPackets.begin() + it);
+                  break;
+                }
               }
             }
-            uint32_t _temp = (1 << (uint8_t)MESH.packetToConsume.front().chunks) -1; //example: 1+2+4 == (2^3)-1
-//            AddLog(LOG_LEVEL_INFO, PSTR("MSH: _temp: %u = %u"),_temp,_packet_combined.receivedChunks);
-            if (_packet_combined.receivedChunks == _temp) {
-              char * _data = (char*)_packet_combined.raw + strlen((char*)_packet_combined.raw) + 1;
-//              AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Publish multipacket"));
-              MqttPublishPayload((char*)_packet_combined.raw, _data);
-              MESH.multiPackets.erase(MESH.multiPackets.begin());
-              break;
-            }
+            it++;
           }
           if (!_foundMultiPacket) {
             mesh_packet_combined_t _packet;
@@ -811,7 +813,7 @@ void CmndMeshNode(void) {
     String mac_address = XdrvMailbox.data;
     if (MESH.channel > 0) {
       broker = true;
-      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Stating connection to Mesh Broker using MAC %s on channel %d"),
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Starting connection to Mesh Broker using MAC %s on channel %d"),
         XdrvMailbox.data, MESH.channel);
       MESHstartNode(MESH.channel, XdrvMailbox.index);
       ResponseCmndNumber(MESH.channel);
@@ -838,12 +840,18 @@ void CmndMeshNode(void) {
     if (!broker) {
       AddLog(LOG_LEVEL_INFO, PSTR("MSH: No Mesh Broker found using MAC %s with SSID %s"), XdrvMailbox.data, EspSsid);
     }
+  } else {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Disconnecting from Mesh Broker"));
+    MESH.role = ROLE_NONE;
+    MESHdeInit();  // if we don't deinit after losing connection, we will get an error trying to reinit later
+    MESHsetWifi(1);
+    WifiBegin(3, MESH.channel);
   }
 #endif  // ESP32
 }
 
 void CmndMeshPeer(void) {
-  if (XdrvMailbox.data_len > 0) {
+  if ((XdrvMailbox.data_len > 11) && (XdrvMailbox.data_len < 18)) {
     uint8_t _MAC[6];
     MESHHexStringToBytes(XdrvMailbox.data, _MAC);
     char _peerMAC[18];
@@ -859,6 +867,22 @@ void CmndMeshPeer(void) {
     } else {
       AddLog(LOG_LEVEL_DEBUG,PSTR("MSH: %s is already on peer list, will not add"), XdrvMailbox.data, _peerMAC);
     }
+  } else {
+    ResponseClear();
+    // ResponseJsonStart();
+    ResponseAppend_P(PSTR("{"));
+    if (MESH.peers.size() > 0) {
+      ResponseAppend_P(PSTR("\"Mesh Peers\":["));
+      bool comma = false;
+      for (auto &_peer : MESH.peers) {
+        char _MAC[18];
+        ToHex_P(_peer.MAC, 6, _MAC,18, ':');
+        ResponseAppend_P(PSTR("%s\"%s\""), (comma)?",":"", _MAC);
+        comma = true;
+      }
+      ResponseAppend_P(PSTR("]"));
+    }
+    ResponseJsonEnd();
   }
 }
 
@@ -881,46 +905,46 @@ void CmndMeshInterval(void) {
 }
 
 void CmndMeshSSID(void) {
-  if ((XdrvMailbox.data_len > 0) && (XdrvMailbox.data_len < 32)) {
-    snprintf_P(MESH.ssid, sizeof(MESH.ssid), PSTR("%s"), XdrvMailbox.data);
-  } else if (XdrvMailbox.data_len == 0) {
+  if (!strcmp(XdrvMailbox.data, "\"")) {
     memset(MESH.ssid, '\0', sizeof(MESH.ssid));
     AddLog(LOG_LEVEL_INFO, PSTR("MSH: SSID set to default"));
-  } else {
-    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid SSID '%s', must be 1-31 characters long"), XdrvMailbox.data);
+  } else if ((XdrvMailbox.data_len > 0) && (XdrvMailbox.data_len < 32)) {
+    snprintf_P(MESH.ssid, sizeof(MESH.ssid), PSTR("%s"), XdrvMailbox.data);
+  } else if (XdrvMailbox.data_len != 0) {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid SSID '%s', must be 1-31 characters long or \" to use the default"), XdrvMailbox.data);
   }
   ResponseCmndChar(MESH.ssid);
 }
 
 void CmndMeshPassword(void) {
-  if ((XdrvMailbox.data_len > 7) && (XdrvMailbox.data_len < 64)) {
+  if (!strcmp(XdrvMailbox.data, "\"")) {
+    memset(MESH.password, '\0', sizeof(MESH.password));
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Broker network set to open"));
+  } else if ((XdrvMailbox.data_len > 7) && (XdrvMailbox.data_len < 64)) {
     snprintf_P(MESH.password, sizeof(MESH.password), PSTR("%s"), XdrvMailbox.data);
     if (!strlen(MESH.ssid)) {
       AddLog(LOG_LEVEL_INFO, PSTR("MSH: a valid MeshSSID must be set for MeshPassword to be used"));
     }
-  } else if (XdrvMailbox.data_len == 0) {
-    memset(MESH.password, '\0', sizeof(MESH.password));
-    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Broker network set to open"));
-  } else {
-    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid Password '%s', must be 8-63 characters long or empty for an open network"), XdrvMailbox.data);
+  } else if (XdrvMailbox.data_len != 0) {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid Password '%s', must be 8-63 characters long or \" for an open network"), XdrvMailbox.data);
   }
   ResponseCmndChar(MESH.password);
 }
 
 void CmndMeshKey(void) {
-  if ((XdrvMailbox.data_len > 0) && (XdrvMailbox.data_len < 33)) {
+  if (!strcmp(XdrvMailbox.data, "\"")) {
+    memset(MESH.key, 0, 32);
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Will use default key"));
+  } else if ((XdrvMailbox.data_len > 0) && (XdrvMailbox.data_len < 33)) {
     memset(MESH.key, 0, 32);
     size_t _length = XdrvMailbox.data_len;
     if (_length > 32) { _length = 32; }
     memcpy(MESH.key, XdrvMailbox.data, _length);
-  } else if (XdrvMailbox.data_len == 0) {
-    memset(MESH.key, 0, 32);
-    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Will use default key"));
-  } else {
-    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid key '%s', must be 1-32 characters long or empty to use the default"), XdrvMailbox.data);
+  } else if (XdrvMailbox.data_len != 0) {
+    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid key '%s', must be 1-32 characters long or \" to use the default"), XdrvMailbox.data);
   }
-  // ResponseCmndChar((char*)MESH.key);
-  Response_P(S_JSON_COMMAND_ASTERISK, XdrvMailbox.command);
+  ResponseCmndChar((char*)MESH.key);
+  // Response_P(S_JSON_COMMAND_ASTERISK, XdrvMailbox.command);
   // Response_P(S_JSON_COMMAND_INDEX_ASTERISK, XdrvMailbox.command, XdrvMailbox.index);
 }
 
