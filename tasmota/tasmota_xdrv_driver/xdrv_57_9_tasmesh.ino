@@ -48,7 +48,7 @@ void CB_MESHDataSent(const uint8_t *MAC, esp_now_send_status_t sendStatus);
 void CB_MESHDataSent(const uint8_t *MAC, esp_now_send_status_t sendStatus) {
   char _destMAC[18];
   ToHex_P(MAC, 6, _destMAC, 18, ':');
-  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Sent to %s status %d"), _destMAC, sendStatus);
+  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Sent to %s status %s"), _destMAC, sendStatus == ESP_NOW_SEND_SUCCESS ? "succeded " : "failed");
 }
 
 //void CB_MESHDataReceived(const uint8_t *MAC, const uint8_t *packet, int len) {
@@ -59,20 +59,19 @@ void CB_MESHDataReceived(const esp_now_recv_info_t *esp_now_info, const uint8_t 
 
   _locked = true;
 
-  uint8_t *MAC = esp_now_info->src_addr;
-
-  char _srcMAC[18];
-  ToHex_P(MAC, 6, _srcMAC, 18, ':');
-  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Rcvd from %s"), _srcMAC);
   mesh_packet_t *_recvPacket = (mesh_packet_t*)packet;
+  uint8_t *_MAC = _recvPacket->sender;
+  char _srcMAC[18];
+  ToHex_P(_MAC, 6, _srcMAC, 18, ':');
+  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Rcvd from %s"), _srcMAC);
   if ((_recvPacket->type == PACKET_TYPE_REGISTER_NODE) || (_recvPacket->type == PACKET_TYPE_REFRESH_NODE)) {
-    if (MESHcheckPeerList((const uint8_t *)MAC) == false) {
+     if (MESHcheckPeerList((const uint8_t *)_MAC) == false) {
       MESHencryptPayload(_recvPacket, 0); //decrypt it and check
       if (memcmp(_recvPacket->payload, MESH.broker, 6) == 0) {
-        MESHaddPeer((uint8_t*)MAC);
+        MESHaddPeer((uint8_t*)_MAC);
 //        AddLog(LOG_LEVEL_INFO, PSTR("MSH: Rcvd topic %s, payload %*_H"), (char*)_recvPacket->payload + 6, MESH.packetToConsume.front().chunkSize+5, (uint8_t *)&MESH.packetToConsume.front().payload);
         for (auto &_peer : MESH.peers) {
-          if (memcmp(_peer.MAC, _recvPacket->sender, 6) == 0) {
+          if (memcmp(_peer.MAC, _MAC, 6) == 0) {
             strcpy(_peer.topic, (char*)_recvPacket->payload + 6);
             MESHsubscribe((char*)&_peer.topic);
             _locked = false;
@@ -95,7 +94,7 @@ void CB_MESHDataReceived(const esp_now_recv_info_t *esp_now_info, const uint8_t 
     }
   }
   MESH.lmfap = millis();
-  if (MESHcheckPeerList(MAC) == true){
+  if (MESHcheckPeerList(_MAC) == true){
     MESH.packetToConsume.push(*_recvPacket);
     AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Packet %d from %s to queue"), MESH.packetToConsume.size(), _srcMAC);
   }
@@ -107,15 +106,18 @@ void CB_MESHDataReceived(const esp_now_recv_info_t *esp_now_info, const uint8_t 
 void CB_MESHDataSent(uint8_t *MAC, uint8_t sendStatus) {
   char _destMAC[18];
   ToHex_P(MAC, 6, _destMAC, 18, ':');
-  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Sent to %s status %d"), _destMAC, sendStatus);
+  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Sent to %s status %s"), _destMAC, sendStatus == ESP_NOW_SEND_SUCCESS ? "succeded " : "failed");
 }
 
 void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
   MESH.lmfap = millis(); //any peer
-  if (memcmp(MAC, MESH.broker, 6) == 0) {
-    MESH.lastMessageFromBroker = millis(); //directly from the broker
+  if (MESHcheckPeerList(MAC) == false) {
+    MESHaddPeer(MAC); // add the peer for the return route
   }
   mesh_packet_t *_recvPacket = (mesh_packet_t*)packet;
+  if (memcmp(_recvPacket->sender, MESH.broker, 6) == 0) {
+    MESH.lastMessageFromBroker = millis(); //indirectly from the broker
+  }
   switch (_recvPacket->type) {
     case PACKET_TYPE_TIME:
       Rtc.utc_time = _recvPacket->senderTime;
@@ -143,21 +145,19 @@ void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
       return; // a 'small node' does not perform mesh functions
     }
     AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Packet to resend ..."));
+    _recvPacket->peerIndex = MESHgetPeerIndex(MAC); // get the local peer index for the source to prevent echoing the packet back
     MESH.packetToResend.push(*_recvPacket);
     return;
   } else {
+    if (_recvPacket->counter == MESH.counter) {
+      return; // duplicate
+    }
+    MESH.counter = _recvPacket->counter;
     if (_recvPacket->type == PACKET_TYPE_WANTTOPIC) {
       MESH.flags.brokerNeedsTopic = 1;
       AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Broker needs topic ..."));
       return; //nothing left to be done
     }
-    // for(auto &_message : MESH.packetsAlreadyReceived){
-    //   if(memcmp(_recvPacket,_message,15==0)){
-    //     AddLog(LOG_LEVEL_INFO, PSTR("MSH: Packet already received"));
-    //     return;
-    //   }
-    // }
-    // MESH.packetsAlreadyReceived.push_back((mesh_packet_header_t*) _recvPacket);
     // AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Packet to consume ..."));
     MESH.packetToConsume.push(*_recvPacket);
   }
@@ -192,6 +192,7 @@ void MESHdeInit(void) {
   AddLog(LOG_LEVEL_INFO, PSTR("MSH: Stopping"));
   // TODO: degister from the broker, so he can stop MQTT-proxy
   esp_now_deinit();
+  MESH.peers.clear();
 #endif  // ESP8266
 }
 
@@ -260,6 +261,7 @@ bool MESHinterceptMQTTonBroker(char* _topic, uint8_t* _data, unsigned int data_l
       memcpy(MESH.sendPacket.payload + MESH.sendPacket.chunkSize, _data, data_len);
       MESH.sendPacket.chunkSize += data_len;
       MESH.sendPacket.chunks = 1;
+      MESH.sendPacket.counter++;
       AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Intercept payload '%s'"), MESH.sendPacket.payload);
       MESH.sendPacket.type = PACKET_TYPE_MQTT;
       MESH.sendPacket.senderTime = Rtc.utc_time;
@@ -401,6 +403,7 @@ void MESHstartNode(int32_t _channel, uint8_t _role){ //we need a running broker 
 
 //  AddLog(LOG_LEVEL_INFO, PSTR("MSH: Node initialized, channel: %u"),wifi_get_channel()); //check if we succesfully set the
   Response_P(PSTR("{\"%s\":{\"Node\":1,\"Channel\":%u,\"Role\":%u}}"), D_CMND_MESH, wifi_get_channel(), _role);
+
   XdrvRulesProcess(0);
 
   esp_now_set_self_role(ESP_NOW_ROLE_COMBO);
@@ -568,15 +571,6 @@ void MESHevery50MSecond(void) {
 //          AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Publish packet"));
           MqttPublishPayload((char*)MESH.packetToConsume.front().payload, _data);
 
-          uint32_t idx = 0;
-          for (auto &_peer : MESH.peers){
-            if (memcmp(_peer.MAC, MESH.packetToConsume.front().sender, 6) == 0) {
-              _peer.lastMessageFromPeer = millis();
-              MESH.lastTeleMsgs[idx] = std::string(_data);
-              break;
-            }
-            idx++;
-          }
 //          AddLog(LOG_LEVEL_INFO, PSTR("MSH: %*_H), MESH.packetToConsume.front().chunkSize, (uint8_t *)&MESH.packetToConsume.front().payload);
         }
         break;
@@ -642,14 +636,11 @@ void MESHevery50MSecond(void) {
   if (MESH.packetToResend.size() > 0) {
     AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Next packet %d to resend of type %u, TTL %u"),
       MESH.packetToResend.size(), MESH.packetToResend.front().type, MESH.packetToResend.front().TTL);
-    if (MESH.packetToResend.front().TTL > 0) {
+    if (MESH.packetToResend.front().TTL > (MESHcheckPeerList((const uint8_t *)MESH.packetToResend.front().receiver, false)? 0: 1)) {
       MESH.packetToResend.front().TTL--;
-      if (memcmp(MESH.packetToResend.front().sender, MESH.broker, 6) != 0) { //do not send back the packet to the broker
-        MESHsendPacket(&MESH.packetToResend.front());
-      }
-    } else {
-      MESH.packetToResend.pop();
+      MESHsendPacket(&MESH.packetToResend.front());
     }
+    MESH.packetToResend.pop();
     // pass the packets
   }
 
@@ -694,6 +685,7 @@ void MESHEverySecond(void) {
     }
     if (millis() - MESH.lastMessageFromBroker > 70000) {
       AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Broker not seen for 70 secs, try to re-launch wifi"));
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Last peer seen %u secs ago"), MESH.lmfap/1000);
       MESH.role = ROLE_NONE;
       MESHdeInit();  // if we don't deinit after losing connection, we will get an error trying to reinit later
       MESHsetWifi(1);
@@ -740,6 +732,7 @@ void MESHshow(bool json) {
 #ifdef ESP32 //web UI only on the the broker = ESP32
 #ifdef USE_WEBSERVER
     if (ROLE_BROKER == MESH.role) {
+      WSContentSend_PD(PSTR("<hr>"));
 //      WSContentSend_PD(PSTR("TAS-MESH:<br>"));
       WSContentSend_PD(PSTR("<b>Broker MAC</b> %s<br>"), WiFi.softAPmacAddress().c_str());
       WSContentSend_PD(PSTR("<b>Broker Channel</b> %u<hr>"), WiFi.channel());
@@ -804,7 +797,7 @@ void CmndMeshBroker(void) {
 
 void CmndMeshNode(void) {
 #ifndef ESP32  // only ESP8266 current supported as node
-  if (XdrvMailbox.data_len > 0) {
+  if (XdrvMailbox.data_len > 11) {
     MESHHexStringToBytes(XdrvMailbox.data, MESH.broker);
     if (XdrvMailbox.index != 0) { XdrvMailbox.index = 1; }    // Everything not 0 is a full node
     // meshnode FA:KE:AD:DR:ES:S1
@@ -840,8 +833,9 @@ void CmndMeshNode(void) {
     if (!broker) {
       AddLog(LOG_LEVEL_INFO, PSTR("MSH: No Mesh Broker found using MAC %s with SSID %s"), XdrvMailbox.data, EspSsid);
     }
-  } else {
+  } else if (!strcmp(XdrvMailbox.data, "\"")) {
     AddLog(LOG_LEVEL_INFO, PSTR("MSH: Disconnecting from Mesh Broker"));
+    Response_P(PSTR("{\"%s\":\"Disconnecting\"}"), D_CMND_MESH);
     MESH.role = ROLE_NONE;
     MESHdeInit();  // if we don't deinit after losing connection, we will get an error trying to reinit later
     MESHsetWifi(1);
@@ -851,7 +845,7 @@ void CmndMeshNode(void) {
 }
 
 void CmndMeshPeer(void) {
-  if ((XdrvMailbox.data_len > 11) && (XdrvMailbox.data_len < 18)) {
+  if (XdrvMailbox.data_len > 11) {
     uint8_t _MAC[6];
     MESHHexStringToBytes(XdrvMailbox.data, _MAC);
     char _peerMAC[18];
@@ -867,22 +861,38 @@ void CmndMeshPeer(void) {
     } else {
       AddLog(LOG_LEVEL_DEBUG,PSTR("MSH: %s is already on peer list, will not add"), XdrvMailbox.data, _peerMAC);
     }
-  } else {
-    ResponseClear();
-    // ResponseJsonStart();
-    ResponseAppend_P(PSTR("{"));
+  } else if (XdrvMailbox.index == 0) {
+    Response_P(PSTR("{\"MeshPeers\":"));
     if (MESH.peers.size() > 0) {
-      ResponseAppend_P(PSTR("\"Mesh Peers\":["));
+      ResponseAppend_P(PSTR("%u,\"LastMessage\":%u,\"LastMessageFromPeer\":{"), MESHcountPeers(), millis() - MESH.lmfap);
       bool comma = false;
       for (auto &_peer : MESH.peers) {
         char _MAC[18];
         ToHex_P(_peer.MAC, 6, _MAC,18, ':');
-        ResponseAppend_P(PSTR("%s\"%s\""), (comma)?",":"", _MAC);
+        ResponseAppend_P(PSTR("%s\"%s\":%u"), (comma)?",":"", _MAC, millis() - _peer.lastMessageFromPeer);
         comma = true;
       }
-      ResponseAppend_P(PSTR("]"));
+      ResponseAppend_P(PSTR("}"));
+    } else {
+      ResponseAppend_P(PSTR("0"));
     }
     ResponseJsonEnd();
+  } else if (!strcmp(XdrvMailbox.data, "\"") && XdrvMailbox.index > 0 && XdrvMailbox.index <= MESH.peers.size()) {
+    char _MAC[18];
+    ToHex_P(MESH.peers[XdrvMailbox.index - 1].MAC, 6, _MAC,18, ':');
+    uint8_t init_result = esp_now_del_peer(MESH.peers[XdrvMailbox.index - 1].MAC);
+    if (init_result == ESP_OK) {
+      MESH.peers.erase(MESH.peers.begin() + XdrvMailbox.index - 1);
+      Response_P(PSTR("{\"%s\":{\"Removed\":\"%s\"}}"), D_CMND_MESH, _MAC);
+    } else {
+      Response_P(PSTR("{\"%s\":{\"FailedRemoving\":\"%s\",\"Error\":%u}}"), D_CMND_MESH, _MAC, init_result);
+    }
+  } else {
+    char _MAC[18] = "empty";
+    if (XdrvMailbox.index <= MESH.peers.size()) {
+      ToHex_P(MESH.peers[XdrvMailbox.index - 1].MAC, 6, _MAC,18, ':');
+    }
+    ResponseCmndIdxChar(_MAC);
   }
 }
 
@@ -944,8 +954,6 @@ void CmndMeshKey(void) {
     AddLog(LOG_LEVEL_INFO, PSTR("MSH: Invalid key '%s', must be 1-32 characters long or \" to use the default"), XdrvMailbox.data);
   }
   ResponseCmndChar((char*)MESH.key);
-  // Response_P(S_JSON_COMMAND_ASTERISK, XdrvMailbox.command);
-  // Response_P(S_JSON_COMMAND_INDEX_ASTERISK, XdrvMailbox.command, XdrvMailbox.index);
 }
 
 /*********************************************************************************************\
@@ -989,7 +997,7 @@ bool Xdrv57(uint32_t function) {
         break;
 #endif  // ESP32
       case FUNC_SHOW_SENSOR:
-        MESHsendPeerList();          // Sync this to the Teleperiod with a delay
+        // MESHsendPeerList();          // Sync this to the Teleperiod with a delay
         break;
 #ifdef USE_DEEPSLEEP
       case FUNC_SAVE_BEFORE_RESTART:

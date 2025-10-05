@@ -40,6 +40,10 @@
 #define MESH_BUFFERS      26       // (6) Max buffers number for splitted messages
 #define MESH_MAX_PACKETS  3        // (3) Max number of packets
 #define MESH_REFRESH      50       // Number of ms
+#ifndef ESP32
+#define ESP_NOW_SEND_SUCCESS 0     // Sending ESP-NOW data successfully
+#define ESP_OK            0
+#endif //not ESP32
 
 // The format of the vendor-specific action frame is as follows:
 // ------------------------------------------------------------------------------------------------------------
@@ -117,7 +121,8 @@ struct mesh_first_header_bytes {   // TODO: evaluate random 4-byte-value of pre-
 
 struct {
   uint32_t lastMessageFromBroker;  // Time of last message from broker
-  uint32_t lmfap;                  // Yime of last message from any peer
+  uint32_t lmfap;                  // Time of last message from any peer
+  uint32_t counter;                // Counter of last message to filter echoes
   uint8_t broker[6] = { 0 };
   uint8_t key[32];
   uint8_t role;
@@ -134,9 +139,6 @@ struct {
   std::vector<mesh_packet_header_t> packetsAlreadySended;
   std::vector<mesh_first_header_bytes> packetsAlreadyReceived;
   std::vector<mesh_packet_combined_t> multiPackets;
-#ifdef ESP32
-  std::vector<std::string> lastTeleMsgs;
-#endif //ESP32
 } MESH;
 
 /*********************************************************************************************\
@@ -235,14 +237,31 @@ void MESHsendPeerList(void) {      // We send this list only to the peers, that 
 }
 
 bool MESHcheckPeerList(const uint8_t *MAC) {
-  bool success = false;
+  return MESHcheckPeerList(MAC, true);
+}
+
+bool MESHcheckPeerList(const uint8_t *MAC, bool update) {
   for (auto &_peer : MESH.peers) {
     if (memcmp(_peer.MAC, MAC, 6) == 0) {
-      _peer.lastMessageFromPeer = millis();
+      if (update) {
+        _peer.lastMessageFromPeer = millis();
+      }
       return true;
     }
   }
   return false;
+}
+
+uint32_t MESHgetPeerIndex(const uint8_t *MAC) {
+  uint32_t index = 0;
+  for (auto &_peer : MESH.peers) {
+    if (memcmp(_peer.MAC, MAC, 6) == 0) {
+      _peer.lastMessageFromPeer = millis();
+      break;
+    }
+    index++;
+  }
+  return index;
 }
 
 uint8_t MESHcountPeers(void) {
@@ -266,10 +285,8 @@ int MESHaddPeer(uint8_t *_MAC ) {
 #ifdef ESP32
   _newPeer.topic[0] = 0;
 #endif
-  MESH.peers.push_back(_newPeer);
 #ifdef ESP32
   std::string _msg = "{\"Init\":1}"; // Init with a simple JSON only while developing
-  MESH.lastTeleMsgs.push_back(_msg); // We must keep this vector in sync with the peers-struct on the broker regarding the indices
 #endif //ESP32
   int err;
 #ifdef ESP32
@@ -283,6 +300,7 @@ int MESHaddPeer(uint8_t *_MAC ) {
   err = esp_now_add_peer(_MAC, ESP_NOW_ROLE_COMBO, MESH.channel, NULL, 0);
 #endif
   if (0 == err) {
+    MESH.peers.push_back(_newPeer);
     char _peerMAC[18];
     ToHex_P(_MAC, 6, _peerMAC, 18, ':');
     AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Peer %s added successful"), _peerMAC);
@@ -333,9 +351,29 @@ void MESHHexStringToBytes(char* _string, uint8_t _MAC[]) { //uppercase
 }
 
 void MESHsendPacket(mesh_packet_t *_packet) {
-  MESHencryptPayload(_packet, 1);
-//  esp_now_send(_packet->receiver, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize);
-  esp_now_send(NULL, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize); //NULL -> broadcast
+  if (memcmp(_packet->sender, MESH.sendPacket.sender, 6) != 0) {
+    uint32_t index = 0;
+    uint32_t _peerIndex = _packet->peerIndex;
+    if (_peerIndex != index) { // set time if the packet originates from the broker
+      _packet->senderTime = Rtc.utc_time;
+    }
+    for (auto &_peer : MESH.peers) {
+      if (_peerIndex != index) {
+        // char _MAC[18];
+        // ToHex_P(_peer.MAC, 6, _MAC,18, ':');
+        // AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Forwarding to %s"), _MAC);
+        esp_now_send(_peer.MAC, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize);
+      }
+      index++;
+    }
+    // esp_now_send(_packet->receiver, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize);
+  } else {
+    MESHencryptPayload(_packet, 1);
+    uint8_t init_result = esp_now_send(NULL, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize); //NULL -> broadcast
+    if (init_result != ESP_OK) {
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Broadcast failed with error: %s"), init_result);
+    }
+  }
 }
 
 void MESHsetKey(uint8_t* _key) {   // Must be 32 bytes!!!
