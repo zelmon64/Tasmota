@@ -86,10 +86,14 @@ void CB_MESHDataReceived(const esp_now_recv_info_t *esp_now_info, const uint8_t 
         return;
       }
     } else {
+      memcpy(MESH.flags.nodeWantsTimeMAC, _recvPacket->sender, 6);
       if (_recvPacket->type == PACKET_TYPE_REGISTER_NODE) {
         MESH.flags.nodeWantsTimeASAP = 1; //this could happen after wake from deepsleep on battery powered device
       } else {
         MESH.flags.nodeWantsTime = 1;
+        // char _MAC[18];
+        // ToHex_P(_recvPacket->sender, 6, _MAC, 18, ':');
+        // AddLog(LOG_LEVEL_INFO, PSTR("MSH: Refresh request from %s"), _MAC);
       }
     }
   }
@@ -120,14 +124,16 @@ void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
   }
   switch (_recvPacket->type) {
     case PACKET_TYPE_TIME:
-      Rtc.utc_time = _recvPacket->senderTime;
-      Rtc.user_time_entry = true;
-      MESH.lastMessageFromBroker = millis();
       if (MESH.flags.nodeGotTime == 0) {
-        RtcSync("Mesh");
-        TasmotaGlobal.rules_flag.system_boot  = 1; // for now we consider the node booted and let trigger system#boot on RULES
+        if (_recvPacket->senderTime > START_VALID_TIME) { // only accept a valid time
+          Rtc.utc_time = _recvPacket->senderTime;
+          Rtc.user_time_entry = true;
+          MESH.lastMessageFromBroker = millis();
+          RtcSync("Mesh");
+          TasmotaGlobal.rules_flag.system_boot  = 1; // for now we consider the node booted and let trigger system#boot on RULES
+          MESH.flags.nodeGotTime = 1;
+        }
       }
-      MESH.flags.nodeGotTime = 1;
       //Wifi.retry = 0;
       // Response_P(PSTR("{\"%s\":{\"Time\":1}}"), D_CMND_MESH); //got the time, now we can publish some sensor data
       // XdrvRulesProcess();
@@ -140,7 +146,7 @@ void CB_MESHDataReceived(uint8_t *MAC, uint8_t *packet, uint8_t len) {
       // nothing for now;
       break;
   }
-  if (memcmp(_recvPacket->receiver, MESH.sendPacket.sender, 6) != 0) { //MESH.sendPacket.sender simply stores the MAC of the node
+  if ((memcmp(_recvPacket->receiver, MESH.sendPacket.sender, 6) != 0) || (_recvPacket->type == PACKET_TYPE_TIME)) { //MESH.sendPacket.sender simply stores the MAC of the node
     if (ROLE_NODE_SMALL == MESH.role) {
       return; // a 'small node' does not perform mesh functions
     }
@@ -359,6 +365,7 @@ bool MESHrouteMQTTtoMESH(const char* _topic, char* _data, bool _retained) {
   return true;
 }
 
+#ifdef ESP8266 // for now only ESP8266, might be added for the ESP32 later
 /**
  * @brief The node sends its mqtt topic to the broker
  *
@@ -374,7 +381,9 @@ void MESHregisterNode(uint8_t mode){
   memcpy(MESH.sendPacket.payload, MESH.broker, 6);
   MESH.sendPacket.type = (mode == 0) ? PACKET_TYPE_REGISTER_NODE : PACKET_TYPE_REFRESH_NODE;
   MESHsendPacket(&MESH.sendPacket);
+  MESH.flags.nodeGotTime = 0;
 }
+#endif  // ESP8266
 
 /*********************************************************************************************\
  * Generic functions
@@ -679,13 +688,16 @@ void MESHEverySecond(void) {
       MESHregisterNode(1); //refresh info
       MESH.flags.brokerNeedsTopic = 0;
     }
+    // static uint8_t _retries = 0;
     if (millis() - MESH.lastMessageFromBroker > 31000) {
       AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Broker not seen for >30 secs"));
       MESHregisterNode(1); //refresh info
+      // _retries++;
     }
     if (millis() - MESH.lastMessageFromBroker > 70000) {
       AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Broker not seen for 70 secs, try to re-launch wifi"));
-      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Last peer seen %u secs ago"), MESH.lmfap/1000);
+      // AddLog(LOG_LEVEL_INFO, PSTR("MSH: Last peer seen %u secs ago"), (millis() - MESH.lmfap) / 1000);
+      // AddLog(LOG_LEVEL_INFO, PSTR("MSH: Retried broker %u times"), _retries);
       MESH.role = ROLE_NONE;
       MESHdeInit();  // if we don't deinit after losing connection, we will get an error trying to reinit later
       MESHsetWifi(1);
@@ -840,6 +852,13 @@ void CmndMeshNode(void) {
     MESHdeInit();  // if we don't deinit after losing connection, we will get an error trying to reinit later
     MESHsetWifi(1);
     WifiBegin(3, MESH.channel);
+  } else {
+    Response_P(PSTR("{\"MeshRole\":\"%s\"}"),
+      MESH.role == ROLE_BROKER     ? "Broker" :
+      MESH.role == ROLE_NODE_FULL  ? "FullNode" :
+      MESH.role == ROLE_NODE_SMALL ? "SmallNode" :
+      "NotInitialized"
+    );
   }
 #endif  // ESP32
 }

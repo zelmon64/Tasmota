@@ -103,10 +103,14 @@ struct mesh_peer_t {
 };
 
 struct mesh_flags_t {
+#ifndef ESP32
   uint8_t brokerNeedsTopic:1;
   uint8_t nodeGotTime:1;
+#else  // ESP8266
   uint8_t nodeWantsTime:1;
   uint8_t nodeWantsTimeASAP:1;
+  uint8_t nodeWantsTimeMAC[6];
+#endif //ESP32
 };
 
 struct mesh_packet_combined_t {
@@ -190,7 +194,7 @@ enum MESH_Packet_Type {            // Type of packet
 void MESHsendTime(void) {          // Only from broker to nodes
   MESH.sendPacket.counter++;
   MESH.sendPacket.type = PACKET_TYPE_TIME;
-  MESH.sendPacket.TTL = 1;
+  MESH.sendPacket.TTL = 2;
   // memcpy(MESH.sendPacket.receiver,MESH.peers[_peerNumber].MAC,6);
   MESH.sendPacket.senderTime = Rtc.utc_time;
   MESH.sendPacket.payload[0] = 0;
@@ -201,6 +205,7 @@ void MESHsendTime(void) {          // Only from broker to nodes
   // }
   MESH.sendPacket.chunkSize = 0;
   MESH.sendPacket.chunks = 0;
+  memcpy(MESH.sendPacket.receiver, MESH.flags.nodeWantsTimeMAC, 6);
   MESHsendPacket(&MESH.sendPacket);
 }
 
@@ -240,7 +245,7 @@ bool MESHcheckPeerList(const uint8_t *MAC) {
   return MESHcheckPeerList(MAC, true);
 }
 
-bool MESHcheckPeerList(const uint8_t *MAC, bool update) {
+bool MESHcheckPeerList(const uint8_t *MAC, const bool update) {
   for (auto &_peer : MESH.peers) {
     if (memcmp(_peer.MAC, MAC, 6) == 0) {
       if (update) {
@@ -253,10 +258,16 @@ bool MESHcheckPeerList(const uint8_t *MAC, bool update) {
 }
 
 uint32_t MESHgetPeerIndex(const uint8_t *MAC) {
+  return MESHgetPeerIndex(MAC, true);
+}
+
+uint32_t MESHgetPeerIndex(const uint8_t *MAC, const bool update) {
   uint32_t index = 0;
   for (auto &_peer : MESH.peers) {
     if (memcmp(_peer.MAC, MAC, 6) == 0) {
-      _peer.lastMessageFromPeer = millis();
+      if (update) {
+        _peer.lastMessageFromPeer = millis();
+      }
       break;
     }
     index++;
@@ -351,29 +362,37 @@ void MESHHexStringToBytes(char* _string, uint8_t _MAC[]) { //uppercase
 }
 
 void MESHsendPacket(mesh_packet_t *_packet) {
-  if (memcmp(_packet->sender, MESH.sendPacket.sender, 6) != 0) {
+#ifndef ESP32
+  if (memcmp(_packet->sender, MESH.sendPacket.sender, 6) != 0) { // only nodes forward packets
     uint32_t index = 0;
     uint32_t _peerIndex = _packet->peerIndex;
-    if (_peerIndex != index) { // set time if the packet originates from the broker
+    uint32_t _senderIndex = MESHgetPeerIndex(_packet->sender, false);
+    if (_packet->type == PACKET_TYPE_TIME) { // set time if the packet is a TIME type
       _packet->senderTime = Rtc.utc_time;
     }
-    for (auto &_peer : MESH.peers) {
-      if (_peerIndex != index) {
-        // char _MAC[18];
-        // ToHex_P(_peer.MAC, 6, _MAC,18, ':');
-        // AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Forwarding to %s"), _MAC);
-        esp_now_send(_peer.MAC, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize);
+    if (_packet->TTL == 0) { // send it directly if this is the packet's last chance
+      esp_now_send(_packet->receiver, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize);
+    } else {
+      for (auto &_peer : MESH.peers) {
+        if ((_senderIndex != index) && (_peerIndex != index)) { // send to all peers appart from the original sender or the one who passed on this packet
+          // char _MAC[18];
+          // ToHex_P(_peer.MAC, 6, _MAC,18, ':');
+          // AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Forwarding to %s"), _MAC);
+          esp_now_send(_peer.MAC, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize);
+        }
+        index++;
       }
-      index++;
     }
-    // esp_now_send(_packet->receiver, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize);
   } else {
+#endif //not ESP32
     MESHencryptPayload(_packet, 1);
     uint8_t init_result = esp_now_send(NULL, (uint8_t *)_packet, sizeof(MESH.sendPacket) - MESH_PAYLOAD_SIZE + _packet->chunkSize); //NULL -> broadcast
     if (init_result != ESP_OK) {
       AddLog(LOG_LEVEL_INFO, PSTR("MSH: Broadcast failed with error: %s"), init_result);
     }
+#ifndef ESP32
   }
+#endif //not ESP32
 }
 
 void MESHsetKey(uint8_t* _key) {   // Must be 32 bytes!!!
