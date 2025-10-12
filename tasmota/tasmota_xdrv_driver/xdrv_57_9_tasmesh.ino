@@ -91,9 +91,9 @@ void CB_MESHDataReceived(const esp_now_recv_info_t *esp_now_info, const uint8_t 
         MESH.flags.nodeWantsTimeASAP = 1; //this could happen after wake from deepsleep on battery powered device
       } else {
         MESH.flags.nodeWantsTime = 1;
-        // char _MAC[18];
-        // ToHex_P(_recvPacket->sender, 6, _MAC, 18, ':');
-        // AddLog(LOG_LEVEL_INFO, PSTR("MSH: Refresh request from %s"), _MAC);
+        char _MAC[18];
+        ToHex_P(_recvPacket->sender, 6, _MAC, 18, ':');
+        AddLog(LOG_LEVEL_INFO, PSTR("MSH: Refresh request from %s with TTL %u"), _MAC, _recvPacket->TTL);
       }
     }
   }
@@ -271,7 +271,8 @@ bool MESHinterceptMQTTonBroker(char* _topic, uint8_t* _data, unsigned int data_l
       AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Intercept payload '%s'"), MESH.sendPacket.payload);
       MESH.sendPacket.type = PACKET_TYPE_MQTT;
       MESH.sendPacket.senderTime = Rtc.utc_time;
-      MESHsendPacket(&MESH.sendPacket);
+      // MESHsendPacket(&MESH.sendPacket);
+      MESH.packetToResend.push(MESH.sendPacket);
       // int result = esp_now_send(MESH.sendPacket.receiver, (uint8_t *)&MESH.sendPacket, (sizeof(MESH.sendPacket))-(MESH_PAYLOAD_SIZE-MESH.sendPacket.chunkSize));
       //send to Node
       return true;
@@ -380,7 +381,8 @@ void MESHregisterNode(uint8_t mode){
   MESH.sendPacket.chunkSize = strlen(TasmotaGlobal.mqtt_topic) + 1 + 6;
   memcpy(MESH.sendPacket.payload, MESH.broker, 6);
   MESH.sendPacket.type = (mode == 0) ? PACKET_TYPE_REGISTER_NODE : PACKET_TYPE_REFRESH_NODE;
-  MESHsendPacket(&MESH.sendPacket);
+  // MESHsendPacket(&MESH.sendPacket);
+  MESH.packetToResend.push(MESH.sendPacket);
   MESH.flags.nodeGotTime = 0;
 }
 #endif  // ESP8266
@@ -476,9 +478,11 @@ void MESHstartBroker(void) {       // Must be called after WiFi is initialized!!
 #ifdef ESP32
 
 void MESHevery50MSecond(void) {
-  // if (MESH.packetToResend.size() > 0) {
-  //   // pass the packets
-  // }
+  if (MESH.packetToResend.size() > 0) {
+    MESHsendPacket(&MESH.packetToResend.front());
+    MESH.packetToResend.pop();
+    // pass the packets
+  }
   if (MESH.packetToConsume.size() > 0) {
 //    AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: _ %15_H"), (uint8_t *)&MESH.packetToConsume.front());
     for (auto &_headerBytes : MESH.packetsAlreadyReceived) {
@@ -696,7 +700,7 @@ void MESHEverySecond(void) {
     }
     if (millis() - MESH.lastMessageFromBroker > 70000) {
       AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Broker not seen for 70 secs, try to re-launch wifi"));
-      // AddLog(LOG_LEVEL_INFO, PSTR("MSH: Last peer seen %u secs ago"), (millis() - MESH.lmfap) / 1000);
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Last peer seen %u secs ago"), (millis() - MESH.lmfap) / 1000);
       // AddLog(LOG_LEVEL_INFO, PSTR("MSH: Retried broker %u times"), _retries);
       MESH.role = ROLE_NONE;
       MESHdeInit();  // if we don't deinit after losing connection, we will get an error trying to reinit later
@@ -711,7 +715,8 @@ void MESHEverySecond(void) {
     MESH.sendPacket.chunk = 0;
     MESH.sendPacket.chunkSize = 0;
     MESH.sendPacket.type = PACKET_TYPE_HEARTBEAT;
-    MESHsendPacket(&MESH.sendPacket);
+    // MESHsendPacket(&MESH.sendPacket);
+    MESH.packetToResend.push(MESH.sendPacket);
 #endif // USE_TASMESH_HEARTBEAT
   }
 }

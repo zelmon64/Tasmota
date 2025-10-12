@@ -206,7 +206,8 @@ void MESHsendTime(void) {          // Only from broker to nodes
   MESH.sendPacket.chunkSize = 0;
   MESH.sendPacket.chunks = 0;
   memcpy(MESH.sendPacket.receiver, MESH.flags.nodeWantsTimeMAC, 6);
-  MESHsendPacket(&MESH.sendPacket);
+  // MESHsendPacket(&MESH.sendPacket);
+  MESH.packetToResend.push(MESH.sendPacket);
 }
 
 void MESHdemandTopic(uint32_t _peerNumber) {
@@ -217,7 +218,8 @@ void MESHdemandTopic(uint32_t _peerNumber) {
   MESH.sendPacket.chunkSize = 0;
   MESH.sendPacket.chunks = 0;
   memcpy(MESH.sendPacket.receiver,MESH.peers[_peerNumber].MAC,6);
-  MESHsendPacket(&MESH.sendPacket);
+  // MESHsendPacket(&MESH.sendPacket);
+  MESH.packetToResend.push(MESH.sendPacket);
 }
 
 #endif //ESP32
@@ -238,7 +240,8 @@ void MESHsendPeerList(void) {      // We send this list only to the peers, that 
   MESH.sendPacket.chunkSize = _idx;
   MESH.sendPacket.TTL = 1;
 //  AddLog(LOG_LEVEL_INFO, PSTR("MSH: %*_H"), MESH.sendPacket.chunkSize, MESH.sendPacket.payload);
-  MESHsendPacket(&MESH.sendPacket);
+  // MESHsendPacket(&MESH.sendPacket);
+  MESH.packetToResend.push(MESH.sendPacket);
 }
 
 bool MESHcheckPeerList(const uint8_t *MAC) {
