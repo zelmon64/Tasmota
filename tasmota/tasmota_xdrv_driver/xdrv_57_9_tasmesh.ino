@@ -858,12 +858,14 @@ void CmndMeshNode(void) {
     MESHsetWifi(1);
     WifiBegin(3, MESH.channel);
   } else {
+#endif  // ESP32
     Response_P(PSTR("{\"MeshRole\":\"%s\"}"),
       MESH.role == ROLE_BROKER     ? "Broker" :
       MESH.role == ROLE_NODE_FULL  ? "FullNode" :
       MESH.role == ROLE_NODE_SMALL ? "SmallNode" :
       "NotInitialized"
     );
+#ifndef ESP32  // only ESP8266 current supported as node
   }
 #endif  // ESP32
 }
