@@ -779,6 +779,8 @@ void MESHshow(bool json) {
         WSContentSend_PD(PSTR("<b>Node MAC</b> %s<br>"), _MAC);
         WSContentSend_PD(PSTR("<b>Last message</b> %u ms<br>"), millis() - _peer.lastMessageFromPeer);
         WSContentSend_PD(PSTR("<b>MQTT topic/group</b> %s/%s"), _peer.topic, _peer.group);
+
+        WSContentSend_P(PSTR("<br><button onclick='la(\"&k57=%d\");'>Toggle</button>"), idx);  // &k57 is related to WebGetArg("k57", tmp, sizeof(tmp));
 /*
         WSContentSend_PD(PSTR("Node MQTT topic: %s <br>"), _peer.topic);
         if (MESH.lastTeleMsgs.size() > idx) {
@@ -812,6 +814,19 @@ void MESHshow(bool json) {
 #endif  // ESP32
   }
 }
+
+#ifdef ESP32 //web UI only on the the broker = ESP32
+#ifdef USE_WEBSERVER
+void MESHwebGetArg(void) {
+  char tmp[8];                             // WebGetArg numbers only
+  WebGetArg(PSTR("k57"), tmp, sizeof(tmp));  // 1 - 16 Pre defined RF keys
+  if (strlen(tmp)) {
+    AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Toggle %s"), tmp);
+  }
+}
+#endif  // USE_WEBSERVER
+#endif  // ESP32
+
 
 /*********************************************************************************************\
  * Commands
@@ -1031,6 +1046,9 @@ bool Xdrv57(uint32_t function) {
 #ifdef USE_WEBSERVER
       case FUNC_WEB_SENSOR:
         MESHshow(0);
+        break;
+      case FUNC_WEB_GET_ARG:
+        MESHwebGetArg();
         break;
 #endif
       case FUNC_JSON_APPEND:
