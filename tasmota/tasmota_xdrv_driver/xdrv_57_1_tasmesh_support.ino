@@ -73,7 +73,7 @@ struct mesh_packet_t {
   uint8_t tag[16];                 // Tag for de/encryption
   uint8_t payload[MESH_PAYLOAD_SIZE];
 } __attribute__((packed));
-
+/*
 struct mesh_packet_header_t {      // ToDo: Maybe, we do not need this
   uint8_t sender[6];               // MAC
   uint8_t receiver[6];             // MAC
@@ -89,12 +89,13 @@ struct mesh_packet_header_t {      // ToDo: Maybe, we do not need this
   };
   uint8_t tag[16];                 // Tag for de/encryption
 } __attribute__((packed));
-
+*/
 struct mesh_peer_t {
   uint8_t MAC[6];
   uint32_t lastMessageFromPeer;    // Time of last message from peer
 #ifdef ESP32
   char topic[MESH_TOPICSZ];
+  char group[MESH_TOPICSZ];
 #ifdef USE_TASMESH_HEARTBEAT
   bool isAlive;                    // True if we have gotten a heartbeat recently
   uint32_t lastHeartbeatFromPeer;  // Time of last heartbeat from peer
@@ -114,7 +115,7 @@ struct mesh_flags_t {
 };
 
 struct mesh_packet_combined_t {
-  mesh_packet_header_t header;
+  mesh_packet_t header;
   uint32_t receivedChunks;         // Bitmask for up to 32 chunks
   char raw[MESH_PAYLOAD_SIZE * MESH_BUFFERS];
 };
@@ -140,7 +141,7 @@ struct {
   std::vector<mesh_peer_t> peers;
   std::queue<mesh_packet_t> packetToResend;
   std::queue<mesh_packet_t> packetToConsume;
-  std::vector<mesh_packet_header_t> packetsAlreadySended;
+  std::vector<mesh_packet_t> packetsAlreadySended;
   std::vector<mesh_first_header_bytes> packetsAlreadyReceived;
   std::vector<mesh_packet_combined_t> multiPackets;
 } MESH;
@@ -179,6 +180,7 @@ enum MESH_Packet_Type {            // Type of packet
   PACKET_TYPE_REGISTER_NODE,       // register a node with encrypted broker-MAC, announce mqtt topic to ESP32-proxy - broker will send time ASAP
   PACKET_TYPE_REFRESH_NODE,        // refresh node infos with encrypted broker-MAC, announce mqtt topic to ESP32-proxy - broker will send time slightly delayed
   PACKET_TYPE_MQTT,                // send regular mqtt messages, single or multipackets
+  PACKET_TYPE_MQTT_RETAINED,       // send retained mqtt messages, single or multipackets
   PACKET_TYPE_WANTTOPIC,           // the broker has no topic for this peer/node
 #ifdef USE_TASMESH_HEARTBEAT
   PACKET_TYPE_HEARTBEAT            // sent periodically from nodes to the broker to signal aliveness
@@ -298,6 +300,7 @@ int MESHaddPeer(uint8_t *_MAC ) {
   _newPeer.lastMessageFromPeer = millis();
 #ifdef ESP32
   _newPeer.topic[0] = 0;
+  _newPeer.group[0] = 0;
 #endif
 #ifdef ESP32
   std::string _msg = "{\"Init\":1}"; // Init with a simple JSON only while developing

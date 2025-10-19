@@ -59,11 +59,15 @@ void CB_MESHDataReceived(const esp_now_recv_info_t *esp_now_info, const uint8_t 
 
   _locked = true;
 
+  uint8_t *MAC = esp_now_info->src_addr;
+  char _viaMAC[18];
+  ToHex_P(MAC, 6, _viaMAC, 18, ':');
+
   mesh_packet_t *_recvPacket = (mesh_packet_t*)packet;
   uint8_t *_MAC = _recvPacket->sender;
   char _srcMAC[18];
   ToHex_P(_MAC, 6, _srcMAC, 18, ':');
-  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Rcvd from %s"), _srcMAC);
+  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Rcvd from %s via %s"), _srcMAC, _viaMAC);
   if ((_recvPacket->type == PACKET_TYPE_REGISTER_NODE) || (_recvPacket->type == PACKET_TYPE_REFRESH_NODE)) {
      if (MESHcheckPeerList((const uint8_t *)_MAC) == false) {
       MESHencryptPayload(_recvPacket, 0); //decrypt it and check
@@ -73,7 +77,9 @@ void CB_MESHDataReceived(const esp_now_recv_info_t *esp_now_info, const uint8_t 
         for (auto &_peer : MESH.peers) {
           if (memcmp(_peer.MAC, _MAC, 6) == 0) {
             strcpy(_peer.topic, (char*)_recvPacket->payload + 6);
+            strcpy(_peer.group, (char*)_recvPacket->payload + 6 + strlen(_peer.topic) + 1);
             MESHsubscribe((char*)&_peer.topic);
+            MESHsubscribe((char*)&_peer.group);
             _locked = false;
             return;
           }
@@ -227,9 +233,13 @@ void MESHunsubscribe(char *topic) {
 
 void MESHconnectMQTT(void){
   for (auto &_peer : MESH.peers) {
-    AddLog(LOG_LEVEL_INFO, PSTR("MSH: Reconnect topic %s"), _peer.topic);
     if (_peer.topic[0] != 0) {
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Reconnect topic %s"), _peer.topic);
       MESHsubscribe(_peer.topic);
+    }
+    if (_peer.group[0] != 0) {
+      AddLog(LOG_LEVEL_INFO, PSTR("MSH: Reconnect group %s"), _peer.group);
+      MESHsubscribe(_peer.group);
     }
   }
 }
@@ -248,13 +258,16 @@ bool MESHinterceptMQTTonBroker(char* _topic, uint8_t* _data, unsigned int data_l
   if (MESH.role != ROLE_BROKER) { return false; }
 
   char stopic[TOPSZ];
+  char sgroup[TOPSZ];
+  bool isgroup = false;
 //  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Intercept topic %s"), _topic);
   for (auto &_peer : MESH.peers) {
     GetTopic_P(stopic, CMND, _peer.topic, PSTR("")); //cmnd/topic/
+    GetTopic_P(sgroup, CMND, _peer.group, PSTR("")); //cmnd/group/
     if (strlen(_topic) != strlen(_topic)) {
       return false; // prevent false result when _topic is the leading substring of stopic
     }
-    if (memcmp(_topic, stopic, strlen(stopic)) == 0) {
+    if ((memcmp(_topic, stopic, strlen(stopic)) == 0) || (memcmp(_topic, sgroup, strlen(sgroup)) == 0)) {
       MESH.sendPacket.chunkSize = strlen(_topic) +1;
 
       if (MESH.sendPacket.chunkSize + data_len > MESH_PAYLOAD_SIZE) {
@@ -275,10 +288,14 @@ bool MESHinterceptMQTTonBroker(char* _topic, uint8_t* _data, unsigned int data_l
       MESH.packetToResend.push(MESH.sendPacket);
       // int result = esp_now_send(MESH.sendPacket.receiver, (uint8_t *)&MESH.sendPacket, (sizeof(MESH.sendPacket))-(MESH_PAYLOAD_SIZE-MESH.sendPacket.chunkSize));
       //send to Node
-      return true;
+      if (memcmp(_topic, sgroup, strlen(sgroup)) == 0) {
+        isgroup = true;
+      } else {
+        return true;
+      }
     }
   }
-  return false;
+  return isgroup;
 }
 
 #else  // ESP8266
@@ -318,7 +335,7 @@ bool MESHrouteMQTTtoMESH(const char* _topic, char* _data, bool _retained) {
   MESH.sendPacket.chunk = 0;
   MESH.sendPacket.chunks = ((_bytesLeft - 1) / MESH_PAYLOAD_SIZE) +1;
   memcpy(MESH.sendPacket.receiver, MESH.broker, 6);
-  MESH.sendPacket.type = PACKET_TYPE_MQTT;
+  MESH.sendPacket.type = _retained ? PACKET_TYPE_MQTT_RETAINED : PACKET_TYPE_MQTT;
   MESH.sendPacket.chunkSize = MESH_PAYLOAD_SIZE;
   MESH.sendPacket.peerIndex = 0;
 //  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Chunks %u, Counter %u"), MESH.sendPacket.chunks, MESH.sendPacket.counter);
@@ -374,6 +391,7 @@ bool MESHrouteMQTTtoMESH(const char* _topic, char* _data, bool _retained) {
 void MESHregisterNode(uint8_t mode){
   memcpy(MESH.sendPacket.receiver, MESH.broker, 6);  // First 6 bytes -> MAC of broker
   strcpy((char*)MESH.sendPacket.payload +6, TasmotaGlobal.mqtt_topic);  // Remaining bytes -> topic of node
+  strcpy((char*)MESH.sendPacket.payload +6+strlen(TasmotaGlobal.mqtt_topic)+1, TasmotaGlobal.mqtt_group);  // Remaining bytes -> group of node
   AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Register node with topic '%s'"), (char*)MESH.sendPacket.payload +6);
   MESH.sendPacket.TTL = 2;
   MESH.sendPacket.chunks = 1;
@@ -542,7 +560,8 @@ void MESHevery50MSecond(void) {
           }
         }
         break;
-      case  PACKET_TYPE_MQTT:      // Redirected MQTT from node in packet [char* _space_ char*]
+      case PACKET_TYPE_MQTT:      // Redirected MQTT from node in packet [char* _space_ char*]
+      case PACKET_TYPE_MQTT_RETAINED:      // Retained MQTT
 //        AddLog(LOG_LEVEL_INFO, PSTR("MSH: Received node output '%s'"), (char*)MESH.packetToConsume.front().payload);
         if (MESH.packetToConsume.front().chunks > 1) {
           bool _foundMultiPacket = false;
@@ -560,7 +579,7 @@ void MESHevery50MSecond(void) {
                 if (_packet_combined.receivedChunks == _temp) {
                   char * _data = (char*)_packet_combined.raw + strlen((char*)_packet_combined.raw) + 1;
 //                  AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Publish multipacket"));
-                  MqttPublishPayload((char*)_packet_combined.raw, _data);
+                  MqttPublishPayload((char*)_packet_combined.raw, _data, 0, (_packet_combined.header.type == PACKET_TYPE_MQTT_RETAINED));
                   MESH.multiPackets.erase(MESH.multiPackets.begin() + it);
                   break;
                 }
@@ -582,7 +601,7 @@ void MESHevery50MSecond(void) {
 //          if (MESH.packetToConsume.front().chunk==0) AddLog(LOG_LEVEL_INFO, PSTR("MSH: %*_H), MESH.packetToConsume.front().chunkSize, (uint8_t *)&MESH.packetToConsume.front().payload);
           char * _data = (char*)MESH.packetToConsume.front().payload + strlen((char*)MESH.packetToConsume.front().payload) +1;
 //          AddLog(LOG_LEVEL_DEBUG, PSTR("MSH: Publish packet"));
-          MqttPublishPayload((char*)MESH.packetToConsume.front().payload, _data);
+          MqttPublishPayload((char*)MESH.packetToConsume.front().payload, _data, 0, (MESH.packetToConsume.front().type == PACKET_TYPE_MQTT_RETAINED));
 
 //          AddLog(LOG_LEVEL_INFO, PSTR("MSH: %*_H), MESH.packetToConsume.front().chunkSize, (uint8_t *)&MESH.packetToConsume.front().payload);
         }
@@ -758,8 +777,8 @@ void MESHshow(bool json) {
         char _MAC[18];
         ToHex_P(_peer.MAC, 6, _MAC, 18, ':');
         WSContentSend_PD(PSTR("<b>Node MAC</b> %s<br>"), _MAC);
-        WSContentSend_PD(PSTR("<b>Node last message</b> %u ms<br>"), millis() - _peer.lastMessageFromPeer);
-        WSContentSend_PD(PSTR("<b>Node MQTT topic</b> %s"), _peer.topic);
+        WSContentSend_PD(PSTR("<b>Last message</b> %u ms<br>"), millis() - _peer.lastMessageFromPeer);
+        WSContentSend_PD(PSTR("<b>MQTT topic/group</b> %s/%s"), _peer.topic, _peer.group);
 /*
         WSContentSend_PD(PSTR("Node MQTT topic: %s <br>"), _peer.topic);
         if (MESH.lastTeleMsgs.size() > idx) {
